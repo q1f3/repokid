@@ -23,18 +23,16 @@ from botocore.exceptions import ClientError as BotoClientError
 from cloudaux.aws.sts import boto3_cached_conn
 from policyuniverse import expand_policy, get_actions_from_statement, all_permissions
 
+import repokid.exceptions
 from repokid import CONFIG as CONFIG
 from repokid import LOGGER as LOGGER
 from repokid.role import Role
 
 # used as a placeholder for empty SID to work around this: https://github.com/aws/aws-sdk-js/issues/833
 DYNAMO_EMPTY_STRING = "---DYNAMO-EMPTY-STRING---"
-DYNAMO_TABLE = None
 
 IAM_ACCESS_ADVISOR_UNSUPPORTED_SERVICES = frozenset(['lightsail'])
 IAM_ACCESS_ADVISOR_UNSUPPORTED_ACTIONS = frozenset(['iam:passrole'])
-
-WEIRD = set([])
 
 
 def add_new_policy_version(role, current_policy, update_source):
@@ -72,7 +70,7 @@ def add_new_policy_version(role, current_policy, update_source):
 def dynamo_get_or_create_table(**dynamo_config):
     """
     Create a new table or get a reference to an existing Dynamo table named 'repokid_roles' that will store data all
-    data for Repokid.  Set the global DYNAMO_TABLE object with a reference to the resource handle.
+    data for Repokid.  Return a table with a reference to the dynamo resource
 
     Args:
         dynamo_config (kwargs):
@@ -83,10 +81,8 @@ def dynamo_get_or_create_table(**dynamo_config):
             endpoint (string)
 
     Returns:
-        None
+        dynamo_table object
     """
-    global DYNAMO_TABLE
-
     if 'localhost' in dynamo_config['endpoint']:
         resource = boto3.resource('dynamodb',
             region_name='us-east-1',
@@ -147,7 +143,7 @@ def dynamo_get_or_create_table(**dynamo_config):
         else:
             LOGGER.error(e)
             sys.exit(1)
-    DYNAMO_TABLE = table
+    return table
 
 
 def find_and_mark_inactive(account_number, active_roles):
@@ -506,8 +502,13 @@ def _calculate_repo_scores(roles):
     Returns:
         None
     """
+    weird_permissions = set()
     for role in roles:
-        permissions = _get_role_permissions(role)
+        try:
+            permissions = _get_role_permissions(role)
+        except repokid.exceptions.UnknownPermissions as e:
+            weird_permissions += e.unknown_permissions
+
         role.total_permissions = len(permissions)
 
         # if we don't have any access advisor data for a service than nothing is repoable
@@ -528,10 +529,9 @@ def _calculate_repo_scores(roles):
             role.repoable_permissions = 0
             role.repoable_services = []
 
-    if WEIRD:
+    if weird_permissions:
         all_services = set([permission.split(':')[0] for permission in all_permissions])
-        # print('Not sure about these permissions:\n{}'.format(json.dumps(list(WEIRD), indent=2, sort_keys=True)))
-        weird_services = set([permission.split(':')[0] for permission in WEIRD])
+        weird_services = set([permission.split(':')[0] for permission in weird_permissions])
         weird_services = weird_services.difference(all_services)
         LOGGER.warn('Not sure about these services:\n{}'.format(json.dumps(list(weird_services), indent=2,
                     sort_keys=True)))
@@ -583,7 +583,7 @@ def _get_repoable_permissions(permissions, aa_data, no_repo_permissions):
     currently allow and Access Advisor data for the services included in the role's policies.
 
     The first step is to come up with a list of services that were used within the time threshold (the same defined)
-    in the age filter config. Permissions are repoable if they aren't in the used list, aren't in the global list
+    in the age filter config. Permissions are repoable if they aren't in the used list, aren't in the constant list
     of unsupported services/actions (IAM_ACCESS_ADVISOR_UNSUPPORTED_SERVICES, IAM_ACCESS_ADVISOR_UNSUPPORTED_ACTIONS),
     and aren't being temporarily ignored because they're on the no_repo_permissions list (newly added).
 
@@ -699,7 +699,7 @@ def _get_role_permissions(role):
     (permission is included in one or more statements that is allowed).  To perform expansion the policyuniverse
     library is used. The result is a list of all of the individual permissions that are allowed in any of the
     statements. If our resultant list contains any permissions that aren't listed in the master list of permissions
-    we'll add them to our global list of WEIRD permissions to warn about later.
+    we'll raise an exception with the set of unknown permissions found.
 
     Args:
         role (Role): The role object that we're getting a list of permissions for
@@ -714,10 +714,9 @@ def _get_role_permissions(role):
             if statement['Effect'].lower() == 'allow':
                 permissions = permissions.union(get_actions_from_statement(statement))
 
-    global WEIRD
     weird_permissions = permissions.difference(all_permissions)
     if weird_permissions:
-        WEIRD = WEIRD.union(weird_permissions)
+        raise repokid.exceptions.UnknownPermissions("Unknown permissions", weird_permissions)
 
     return permissions
 
@@ -798,3 +797,6 @@ def _store_item(role, current_policy):
                                     'Repoed': role.repoed})
     except BotoClientError as e:
         LOGGER.error('Dynamo table error: {}'.format(e))
+
+
+DYNAMO_TABLE = dynamo_get_or_create_table(**CONFIG['dynamo_db'])

@@ -44,6 +44,7 @@ from tabulate import tabulate
 import tabview as t
 from tqdm import tqdm
 
+import repokid
 from . import LOGGER as LOGGER
 from . import CONFIG as CONFIG
 from . import __version__ as __version__
@@ -299,7 +300,11 @@ def update_role_cache(account_number):
     LOGGER.info('Filtering roles')
     plugins = FilterPlugins()
 
-    for plugin in CONFIG.get('active_filters'):
+    # Blacklist needs to know the current account
+    config = CONFIG
+    config['filter_config']['BlacklistFilter']['current_account'] = account_number
+
+    for plugin in config.get('active_filters'):
         plugins.load_plugin(plugin)
 
     for plugin in plugins.filter_plugins:
@@ -743,7 +748,8 @@ def repo_stats(output_file, account_number=None):
 
 
 def main():
-    global CONFIG
+    CONFIG = repokid.CONFIG
+    
     args = docopt(__doc__, version='Repokid {version}'.format(version=__version__))
 
     if args.get('config'):
@@ -758,8 +764,6 @@ def main():
 
     # Blacklist needs to know the current account
     CONFIG['filter_config']['BlacklistFilter']['current_account'] = account_number
-
-    roledata.dynamo_get_or_create_table(**CONFIG['dynamo_db'])
 
     if args.get('update_role_cache'):
         return update_role_cache(account_number)

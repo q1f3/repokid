@@ -17,6 +17,7 @@ import os
 
 __version__ = '0.6'
 
+
 def init_config():
     """
     Try to find config by searching for it in a few paths, load it, and store it in the global CONFIG
